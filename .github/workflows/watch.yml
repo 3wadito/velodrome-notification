@@ -1,0 +1,43 @@
+name: crous-velodrome-watch
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: crous-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests beautifulsoup4
+
+      - name: Watch
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          KEYWORDS: "VELODROME,CHARMOIS"
+          POLL_SECONDS: "5"
+          RUN_SECONDS: "3300"
+        run: python crous_watch.py
+
+      - name: Persist state
+        if: always()
+        run: |
+          git config user.name "crous-watch"
+          git config user.email "actions@github.com"
+          git add known.json || true
+          git diff --staged --quiet || git commit -m "state $(date -u +%FT%TZ)"
+          git push || true
