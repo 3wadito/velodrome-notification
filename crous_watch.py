@@ -44,6 +44,7 @@ from bs4 import BeautifulSoup
 BASE = "https://trouverunlogement.lescrous.fr"
 STATE = Path(__file__).with_name("known.json")
 BEAT = Path(__file__).with_name("heartbeat.json")
+PHASES = Path(__file__).with_name("phases.json")
 UA = "crous-velodrome-watch/2.0 (personal availability alert)"
 
 
@@ -129,15 +130,84 @@ def session():
     return s
 
 
-def active_tool_id(s):
+def fetch_campaigns(s):
+    """Return every published campaign the platform is advertising."""
     r = s.get(f"{BASE}/api/fr/tools", timeout=20)
     if r.status_code in (403, 429, 503):
         raise Blocked(f"HTTP {r.status_code} on /api/fr/tools")
     r.raise_for_status()
-    tools = [t for t in r.json() if t.get("enabled") and t.get("published")]
-    if not tools:
+    return [t for t in r.json() if t.get("enabled") and t.get("published")]
+
+
+# Crous Lorraine runs mid-year transfers ("changement de logement") as their
+# own time-limited campaign on this same platform, separate from the ordinary
+# application phases - and a request filed after the closing date is refused
+# outright, so the opening date is the thing worth knowing. Both kinds show
+# up as entries in /api/fr/tools, distinguished only by their name.
+TRANSFER_WORDS = ("CHANGEMENT", "TRANSFERT", "MUTATION")
+
+
+def campaign_kind(name):
+    if any(w in deaccent(name or "") for w in TRANSFER_WORDS):
+        return "TRANSFER WINDOW OPEN"
+    return "NEW APPLICATION PHASE OPEN"
+
+
+def check_new_phase(campaigns):
+    """Alert when a new booking window opens.
+
+    A phase closing is the end of your ability to apply; a new one appearing
+    is the moment it reopens, and those are announced by the platform only by
+    showing up in this list. Comparing against a committed file means the
+    comparison survives the hourly restart, so a phase opening at 3am is
+    still new the first time any run sees it.
+    """
+    seen = {}
+    if PHASES.exists():
+        try:
+            seen = json.loads(PHASES.read_text())
+        except Exception:
+            seen = {}
+
+    changed = False
+    for c in campaigns:
+        cid = str(c["id"])
+        login = "no login needed" if not c.get("dse_required") else "DSE login required"
+        if cid not in seen:
+            if seen:  # do not shout about the phase that already existed
+                notify(
+                    campaign_kind(c.get("name")),
+                    f"{c.get('name', 'Phase ' + cid)}\n"
+                    f"Opens: {str(c.get('startDate', ''))[:10] or '?'}   "
+                    f"Closes: {str(c.get('endDate', ''))[:10] or '?'}\n"
+                    f"{login}\n\n{BASE}/tools/{cid}/search",
+                    url=f"{BASE}/tools/{cid}/search",
+                    tags="tada,rotating_light",
+                )
+            seen[cid] = {"name": c.get("name"), "dse": bool(c.get("dse_required"))}
+            changed = True
+        elif seen[cid].get("dse") and not c.get("dse_required"):
+            # Went from login-required to open: you can now apply without a DSE.
+            notify(
+                "CROUS PHASE NOW OPEN TO ALL",
+                f"{c.get('name', cid)} no longer requires a DSE login.\n\n"
+                f"{BASE}/tools/{cid}/search",
+                url=f"{BASE}/tools/{cid}/search",
+                tags="unlock",
+            )
+            seen[cid]["dse"] = False
+            changed = True
+
+    if changed:
+        PHASES.write_text(json.dumps(seen, indent=0))
+
+
+def active_tool_id(s):
+    campaigns = fetch_campaigns(s)
+    if not campaigns:
         raise RuntimeError("no active Crous campaign right now")
-    return max(tools, key=lambda t: t["id"])["id"]
+    check_new_phase(campaigns)
+    return max(campaigns, key=lambda t: t["id"])["id"]
 
 
 def fetch_listings(s, tool_id, max_pages=25):
@@ -277,7 +347,9 @@ class Health:
 
 def cycle(s, known, seeded, health):
     try:
-        tool_id = active_tool_id(s)
+        tools = fetch_tools(s)
+        check_campaigns(tools)
+        tool_id = active_tool_id(tools)
         listings = fetch_listings(s, tool_id)
     except Blocked as e:
         health.fault(str(e))
