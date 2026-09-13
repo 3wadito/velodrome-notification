@@ -347,9 +347,9 @@ class Health:
 
 def cycle(s, known, seeded, health):
     try:
-        tools = fetch_tools(s)
-        check_campaigns(tools)
-        tool_id = active_tool_id(tools)
+        # active_tool_id fetches the campaign list, runs the new-phase and
+        # transfer-window check against it, and returns the live campaign.
+        tool_id = active_tool_id(s)
         listings = fetch_listings(s, tool_id)
     except Blocked as e:
         health.fault(str(e))
