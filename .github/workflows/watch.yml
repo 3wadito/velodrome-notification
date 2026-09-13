@@ -3,7 +3,8 @@ name: crous-velodrome-watch
 # GitHub kills long runs, so coverage is a chain of runs rather than one
 # process. The cron fires every 5 minutes, but the concurrency lock lets only
 # one run at a time: the others wait in the queue and start the instant the
-# current one ends.
+# current one ends. That way GitHub's scheduling delay happens while a run is
+# still working, instead of leaving a hole after it finishes.
 
 on:
   schedule:
@@ -35,14 +36,27 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           KEYWORDS: "VELODROME,CHARMOIS"
           POLL_SECONDS: "30"
+          HEARTBEAT_HOURS: "12"
           RUN_SECONDS: "3540"
         run: python crous_watch.py
+
+      - name: Alert if the job itself crashed
+        if: failure()
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          curl -s \
+            -H "Title: WATCHER CRASHED" \
+            -H "Priority: urgent" \
+            -H "Tags: skull" \
+            -d "The GitHub job failed, so the script is not running. Open the Actions tab and read the failed step. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            "https://ntfy.sh/$NTFY_TOPIC" || true
 
       - name: Persist state
         if: always()
         run: |
           git config user.name "crous-watch"
           git config user.email "actions@github.com"
-          git add known.json || true
+          git add known.json heartbeat.json || true
           git diff --staged --quiet || git commit -m "state $(date -u +%FT%TZ)"
           git push || true
