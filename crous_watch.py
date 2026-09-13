@@ -248,12 +248,19 @@ def matches(listing):
 
 
 def load_state():
+    """Return (known ids, already_seeded).
+
+    Seeded is the existence of the file, not whether it has anything in it.
+    With nothing currently listed at your residences the set is legitimately
+    empty, and treating empty as "never run" would make every restart
+    announce itself as a first run.
+    """
     if STATE.exists():
         try:
-            return set(json.loads(STATE.read_text()))
+            return set(json.loads(STATE.read_text())), True
         except Exception:
-            return set()
-    return set()
+            return set(), True
+    return set(), False
 
 
 def save_state(ids):
@@ -396,8 +403,7 @@ def cycle(s, known, seeded, health):
 
 def main():
     s = session()
-    known = load_state()
-    seeded = bool(known)
+    known, seeded = load_state()
     health = Health()
     deadline = time.time() + RUN_SECONDS if RUN_SECONDS else None
     backoff = 0
