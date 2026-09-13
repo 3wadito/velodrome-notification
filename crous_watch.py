@@ -43,6 +43,7 @@ from bs4 import BeautifulSoup
 
 BASE = "https://trouverunlogement.lescrous.fr"
 STATE = Path(__file__).with_name("known.json")
+BEAT = Path(__file__).with_name("heartbeat.json")
 UA = "crous-velodrome-watch/2.0 (personal availability alert)"
 
 
@@ -62,6 +63,7 @@ NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 POLL_SECONDS = float(os.environ.get("POLL_SECONDS", "5"))
 RUN_SECONDS = int(os.environ.get("RUN_SECONDS", "0"))
 ALARM_AFTER = int(os.environ.get("ALARM_AFTER", "3"))
+HEARTBEAT_HOURS = float(os.environ.get("HEARTBEAT_HOURS", "12"))
 
 
 class Blocked(Exception):
@@ -188,6 +190,40 @@ def save_state(ids):
     STATE.write_text(json.dumps(sorted(ids), indent=0))
 
 
+def heartbeat(listings_count, hits_count):
+    """Periodic proof-of-life.
+
+    Silence is ambiguous: a healthy watcher with nothing to report looks
+    exactly like a dead one. The BLIND alarm only speaks while the script is
+    running, so it cannot report a crashed or never-launched job. This sends
+    a low-priority ping every HEARTBEAT_HOURS. If one fails to arrive on
+    schedule, the chain is broken somewhere the script itself cannot see.
+
+    The timestamp lives in a committed file so the interval survives the
+    hourly restart.
+    """
+    if HEARTBEAT_HOURS <= 0:
+        return
+    now = time.time()
+    last = 0.0
+    if BEAT.exists():
+        try:
+            last = float(json.loads(BEAT.read_text()).get("last", 0))
+        except Exception:
+            last = 0.0
+    if now - last < HEARTBEAT_HOURS * 3600:
+        return
+    notify(
+        "Watcher alive",
+        f"Still checking every {int(POLL_SECONDS)}s.\n"
+        f"{listings_count} listings nationally, {hits_count} at "
+        f"{'/'.join(KEYWORDS)}.",
+        priority="min",
+        tags="green_heart",
+    )
+    BEAT.write_text(json.dumps({"last": now}))
+
+
 def notify(title, body, url=None, priority="urgent", tags="house,rotating_light"):
     if not NTFY_TOPIC:
         print(f"[no NTFY_TOPIC] {title} :: {body}")
@@ -260,6 +296,7 @@ def cycle(s, known, seeded, health):
 
     hits = {k: v for k, v in listings.items() if matches(v)}
     print(f"tool={tool_id} total={len(listings)} matching={len(hits)}")
+    heartbeat(len(listings), len(hits))
 
     if not seeded:
         known.update(hits.keys())
