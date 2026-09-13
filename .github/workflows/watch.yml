@@ -1,8 +1,13 @@
 name: crous-velodrome-watch
 
+# GitHub kills long runs, so coverage is a chain of runs rather than one
+# process. The cron fires every 5 minutes, but the concurrency lock lets only
+# one run at a time: the others wait in the queue and start the instant the
+# current one ends.
+
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -30,7 +35,7 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           KEYWORDS: "VELODROME,CHARMOIS"
           POLL_SECONDS: "5"
-          RUN_SECONDS: "3300"
+          RUN_SECONDS: "3540"
         run: python crous_watch.py
 
       - name: Persist state
