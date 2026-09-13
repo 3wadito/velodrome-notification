@@ -34,7 +34,7 @@ jobs:
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           KEYWORDS: "VELODROME,CHARMOIS"
-          POLL_SECONDS: "5"
+          POLL_SECONDS: "30"
           RUN_SECONDS: "3540"
         run: python crous_watch.py
 
