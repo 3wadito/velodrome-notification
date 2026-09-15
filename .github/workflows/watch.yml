@@ -57,6 +57,13 @@ jobs:
         run: |
           git config user.name "crous-watch"
           git config user.email "actions@github.com"
-          git add known.json heartbeat.json || true
-          git diff --staged --quiet || git commit -m "state $(date -u +%FT%TZ)"
-          git push || true
+          git add known.json heartbeat.json phases.json || true
+          git diff --staged --quiet && exit 0
+          git commit -m "state $(date -u +%FT%TZ)"
+          # Overlapping runs can both push, so rebase onto whatever landed
+          # first rather than losing this run's state to a rejected push.
+          for i in 1 2 3; do
+            git pull --rebase --autostash && git push && exit 0
+            sleep 5
+          done
+          echo "could not persist state after 3 attempts" >&2
