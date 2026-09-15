@@ -64,6 +64,7 @@ NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 POLL_SECONDS = float(os.environ.get("POLL_SECONDS", "5"))
 RUN_SECONDS = int(os.environ.get("RUN_SECONDS", "0"))
 ALARM_AFTER = int(os.environ.get("ALARM_AFTER", "3"))
+REALERT_HOURS = float(os.environ.get("REALERT_HOURS", "12"))
 HEARTBEAT_HOURS = float(os.environ.get("HEARTBEAT_HOURS", "12"))
 
 
@@ -78,6 +79,12 @@ class Blocked(Exception):
 RE_PRICE = re.compile(r"\d[\d\s  .,]*€")
 RE_SURFACE = re.compile(r"\d[\d,.]*\s*m²")
 RE_POSTCODE = re.compile(r"\b\d{5}\b")
+RE_PRICE_ANY = re.compile(
+    r"(?:de\s*)?\d[\d\s\u00a0\u202f.,]*(?:\s*(?:a|à)\s*\d[\d\s\u00a0\u202f.,]*)?\s*€"
+)
+RE_SURFACE_ANY = re.compile(
+    r"\d[\d.,]*(?:\s*(?:a|à)\s*\d[\d.,]*)?\s*m(?:²|2)\b", re.I
+)
 OCCUPANCY = ("INDIVIDUEL", "COLOCATION", "COUPLE")
 
 
@@ -104,6 +111,18 @@ def parse_card(card):
             rec["occupancy"] = " ".join(p.split())
         elif not rec["beds"] and "LIT" in up:
             rec["beds"] = " ".join(p.split())
+
+    # Fallback: the site sometimes splits a value from its unit across two
+    # elements ("311,04" in one, "EUR" in the next), so per-element matching
+    # finds neither. Re-scan the whole card text, where they sit adjacent.
+    if not rec["price"]:
+        m = RE_PRICE_ANY.search(rec["text"])
+        if m:
+            rec["price"] = " ".join(m.group(0).split())
+    if not rec["surface"]:
+        m = RE_SURFACE_ANY.search(rec["text"])
+        if m:
+            rec["surface"] = " ".join(m.group(0).split())
     return rec
 
 
@@ -248,23 +267,27 @@ def matches(listing):
 
 
 def load_state():
-    """Return (known ids, already_seeded).
+    """Return ({listing id: last alert epoch}, already_seeded).
 
-    Seeded is the existence of the file, not whether it has anything in it.
-    With nothing currently listed at your residences the set is legitimately
-    empty, and treating empty as "never run" would make every restart
-    announce itself as a first run.
+    Stored as a map rather than a bare list so a listing that vanishes and
+    comes back is not announced twice in a row. Seeded is the existence of
+    the file, not whether it has anything in it: with nothing currently
+    listed at your residences the set is legitimately empty, and treating
+    empty as "never run" would make every restart announce itself.
     """
-    if STATE.exists():
-        try:
-            return set(json.loads(STATE.read_text())), True
-        except Exception:
-            return set(), True
-    return set(), False
+    if not STATE.exists():
+        return {}, False
+    try:
+        raw = json.loads(STATE.read_text())
+    except Exception:
+        return {}, True
+    if isinstance(raw, list):  # migrate the old format
+        return {str(k): 0.0 for k in raw}, True
+    return {str(k): float(v) for k, v in raw.items()}, True
 
 
-def save_state(ids):
-    STATE.write_text(json.dumps(sorted(ids), indent=0))
+def save_state(known):
+    STATE.write_text(json.dumps(known, indent=0, sort_keys=True))
 
 
 def heartbeat(listings_count, hits_count):
@@ -305,7 +328,12 @@ def notify(title, body, url=None, priority="urgent", tags="house,rotating_light"
     if not NTFY_TOPIC:
         print(f"[no NTFY_TOPIC] {title} :: {body}")
         return
-    headers = {"Title": title.encode("utf-8"), "Priority": priority, "Tags": tags}
+    headers = {
+        "Title": title.encode("utf-8"),
+        "Priority": priority,
+        "Tags": tags,
+        "Content-Type": "text/plain; charset=utf-8",
+    }
     if url:
         headers["Click"] = url
     try:
@@ -378,7 +406,7 @@ def cycle(s, known, seeded, health):
     heartbeat(len(listings), len(hits))
 
     if not seeded:
-        known.update(hits.keys())
+        known.update({k: time.time() for k in hits})
         notify(
             "Crous watcher armed",
             f"Watching: {', '.join(KEYWORDS)}\n"
@@ -389,15 +417,23 @@ def cycle(s, known, seeded, health):
         )
         return known, True, False
 
-    for v in (hits[k] for k in hits if k not in known):
+    now = time.time()
+    for lid, v in hits.items():
+        last = known.get(lid, 0.0)
+        if last and now - last < REALERT_HOURS * 3600:
+            continue  # already told you about this one recently
         notify(
             f"DISPO: {v['name']}",
             f"{format_listing(v)}\n\n{v['url']}",
             url=v["url"],
         )
         print(f"NEW: {v['name']} | {v.get('price')} | {v.get('surface')} -> {v['url']}")
+        known[lid] = now
 
-    known = (known & set(listings.keys())) | set(hits.keys())
+    # Keep entries for a while after a listing disappears, so a relisting
+    # inside the cooldown does not re-notify. Drop only the long-stale ones.
+    cutoff = now - max(REALERT_HOURS * 3600 * 4, 86400)
+    known = {k: t for k, t in known.items() if t >= cutoff or k in listings}
     return known, True, False
 
 
