@@ -149,6 +149,21 @@ def session():
     return s
 
 
+def decoded(r):
+    """Return the response body decoded as UTF-8.
+
+    The Crous pages are UTF-8 but do not always say so in the Content-Type
+    header, and requests then falls back to ISO-8859-1 per the HTTP spec.
+    That silently turns "€" into "â\x82¬" and "m²" into "mÂ²", so any pattern
+    looking for those characters finds nothing and the price and surface come
+    out blank - while the address still looks almost readable ("AllÃ©e"),
+    which is what makes the fault easy to misread as a parsing problem.
+    """
+    if not r.encoding or r.encoding.lower() in ("iso-8859-1", "latin-1"):
+        r.encoding = r.apparent_encoding or "utf-8"
+    return r.text
+
+
 def fetch_campaigns(s):
     """Return every published campaign the platform is advertising."""
     r = s.get(f"{BASE}/api/fr/tools", timeout=20)
@@ -237,7 +252,7 @@ def fetch_listings(s, tool_id, max_pages=25):
         if r.status_code in (403, 429, 503):
             raise Blocked(f"HTTP {r.status_code} on page {page}")
         r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
+        soup = BeautifulSoup(decoded(r), "html.parser")
         cards = soup.select("div.fr-card")
         if not cards:
             break
